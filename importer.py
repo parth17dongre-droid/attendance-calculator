@@ -1,109 +1,122 @@
-#importer file
 import pandas as pd
-import datetime
 import re
+
 class ExcelImporter:
-    def parse_excel(self, file_path, sheet_name=0):
+    def get_student_schedule(self, file_path, user_batch):
+        """
+        Main function to get the schedule for a specific batch (e.g., "A1").
+        Returns a dictionary: {'Monday': ['Math (D101)', '[LAB] OOP OSTL'], ...}
+        """
+        schedule = {}
+        
+        print(f"--- Reading file: {file_path} ---")
         try:
-            # 1. Read the Excel File
-            df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
-            
-            
-            df.iloc[:, 0] = df.iloc[:, 0].ffill()
-            
-            # NOW it is safe to fill the rest with dashes
-            df = df.fillna("-")
-            
-            weekly_schedule = {}
-            ignore_list = ["-", "nan", "lunch", "break"] 
-
-            def get_day_from_cell(cell_val):
-                if isinstance(cell_val, (pd.Timestamp, datetime.date, datetime.datetime)):
-                    return cell_val.strftime("%A")
-                text = str(cell_val).strip().upper()
-                if text in ["MON", "MONDAY"]: return "Monday"
-                if text in ["TUE", "TUESDAY"]: return "Tuesday"
-                if text in ["WED", "WEDNESDAY"]: return "Wednesday"
-                if text in ["THU", "THURSDAY"]: return "Thursday"
-                if text in ["FRI", "FRIDAY"]: return "Friday"
-                if text in ["SAT", "SATURDAY"]: return "Saturday"
-                if text in ["SUN", "SUNDAY"]: return "Sunday"
-                return None
-
-            for index, row in df.iterrows():
-                first_cell = row[0]
-                day_name = get_day_from_cell(first_cell)
-                
-                if day_name:
-                    # Initialize list if new day
-                    if day_name not in weekly_schedule:
-                        weekly_schedule[day_name] = []
-                    
-                    subjects = []
-                    for cell_value in row[1:]:
-                        raw_text = str(cell_value).strip()
-                        clean_text = raw_text.lower()
-                        
-                        is_ignored = any(x in clean_text for x in ignore_list)
-                        if not is_ignored and len(clean_text) > 2:
-                            # Add to the day's list (allows multiple rows per day)
-                            weekly_schedule[day_name].append(raw_text)
-
-            return weekly_schedule
-
+            df = pd.read_excel(file_path, header=None)
         except Exception as e:
-            print(f"❌ Error parsing Excel: {e}")
-            return None
+            print(f"CRITICAL ERROR: {e}")
+            return {}
 
-    import pandas as pd
-import datetime
-import re
+        # 1. Clean Data: Fill down Day names
+        df.iloc[:, 0] = df.iloc[:, 0].ffill()
+        
+        valid_days = ["MON", "MONDAY", "TUE", "TUESDAY", "WED", "WEDNESDAY", 
+                      "THU", "THURSDAY", "FRI", "FRIDAY", "SAT", "SATURDAY"]
 
-class ExcelImporter:
-    def get_filtered_schedule(self, full_schedule, user_batch):
-        cleaned_schedule = {}
-        
-        possible_batches = ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3"]
-        
-        all_batches_pattern = "|".join(re.escape(b) for b in possible_batches)
-        
-        user_pattern = re.compile(
-            rf"({re.escape(user_batch)}[\:\s\/\-].*?)(\n|{all_batches_pattern}|\Z)",
-            re.IGNORECASE | re.DOTALL
-        )
-        
-        for day, subject_list in full_schedule.items():
-            daily_classes = []
+        # 2. Iterate through rows
+        for index, row in df.iterrows():
+            day_raw = str(row[0]).strip().upper()
             
-            for cell_text in subject_list:
-                raw_text = str(cell_text).strip()
-                
-                is_batch_specific = any(b in raw_text for b in possible_batches)
-                if not is_batch_specific:
-                    if len(raw_text) > 2:
-                        daily_classes.append(raw_text)
-                    continue
+            # Map "MON" -> "Monday" for the app
+            if day_raw in ["MON", "MONDAY"]: day_key = "Monday"
+            elif day_raw in ["TUE", "TUESDAY"]: day_key = "Tuesday"
+            elif day_raw in ["WED", "WEDNESDAY"]: day_key = "Wednesday"
+            elif day_raw in ["THU", "THURSDAY"]: day_key = "Thursday"
+            elif day_raw in ["FRI", "FRIDAY"]: day_key = "Friday"
+            elif day_raw in ["SAT", "SATURDAY"]: day_key = "Saturday"
+            else: continue # Skip invalid rows
 
-                normalized_text = raw_text.replace('\n', ' | ').replace(' / ', ' | ')
-                
-                sections = [s.strip() for s in normalized_text.split(' | ') if s.strip()]
-                
-                found_class = None
-                for section in sections:
-                    if section.startswith(user_batch) or f" {user_batch}:" in section or f" {user_batch} " in section:
-                        found_class = section
-                        break
+            if day_key not in schedule:
+                schedule[day_key] = []
 
-                if found_class:
-                    is_lab = any(kw in found_class.upper() for kw in ["LAB", "PRACTICAL", "TUTORIAL", "TUTE", "CL"])
+            # 3. Iterate columns (Time Slots)
+            # We stop 1 column early to allow checking the "next_cell"
+            for col_idx in range(1, len(row) - 1):
+                current_cell = row[col_idx]
+                next_cell = row[col_idx + 1]
+                
+                # Check if cell is valid (not empty/dash)
+                if pd.notna(current_cell) and str(current_cell).strip() not in ["-", "nan", ""]:
                     
-                    if not is_lab:
-                        pass 
+                    # --- THE DECISION LOGIC ---
+                    # If next cell is Empty/NaN, it is a 2-Hour Lab
+                    is_lab_lecture = pd.isna(next_cell) or str(next_cell).strip() in ["", "nan"]
+                    
+                    extracted_data = None
 
-                    final_subject_tagged = f"[LAB] {found_class}"
-                    daily_classes.append(final_subject_tagged)
+                    if is_lab_lecture:
+                        # Call the NEW function
+                        extracted_data = self._extract_lab(str(current_cell), user_batch)
+                    else:
+                        # Call the OLD function
+                        extracted_data = self._extract_theory(str(current_cell))
 
-            if daily_classes:
-                cleaned_schedule[day] = daily_classes
+                    # If we found valid data, add it to the list
+                    if extracted_data:
+                        schedule[day_key].append(extracted_data)
 
-        return cleaned_schedule
+        return schedule
+
+    def _extract_theory(self, cell_text):
+        """
+        Old Logic: Just cleans up the text for Theory lectures.
+        """
+        raw_text = cell_text.strip()
+        
+        # Filter out "Lunch" or "Break"
+        if "LUNCH" in raw_text.upper():
+            return "LUNCH"
+            
+        # Replace newlines with spaces so it fits in one line
+        clean_text = raw_text.replace('\n', ' ')
+        return clean_text
+
+    def _extract_lab(self, cell_text, target_batch):
+        """
+        New Logic: Finds the specific batch line and returns 'Subject Room' string.
+        """
+        # Regex to find batch safely (e.g., "A1" followed by colon or space)
+        batch_pattern = re.compile(rf"{re.escape(target_batch)}[:\s]", re.IGNORECASE)
+        
+        lines = cell_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            
+            # 1. Search for the batch
+            if batch_pattern.search(line):
+                
+                # 2. Tokenize (Split by words)
+                tokens = re.split(r'\s+', line)
+                
+                # Find index of batch code (e.g. "A1:")
+                for i, token in enumerate(tokens):
+                    if target_batch in token:
+                        try:
+                            # We want the word AFTER batch (Subject) and 3rd word (Room)
+                            # List: ['CSE', 'A1:', 'OOP', '(AK)', '(OSTL)']
+                            # Index:   0      1      2       3        4
+                            
+                            # Safety check: make sure list is long enough
+                            if len(tokens) > i + 3:
+                                subject = tokens[i + 1].replace('(', '').replace(')', '')
+                                room = tokens[i + 3].replace('(', '').replace(')', '')
+                                return f"[LAB] {subject} {room}"
+                            
+                            elif len(tokens) > i + 1:
+                                # Fallback if room is missing
+                                subject = tokens[i + 1].replace('(', '').replace(')', '')
+                                return f"[LAB] {subject}"
+                                
+                        except IndexError:
+                            return None
+        return None

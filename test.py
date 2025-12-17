@@ -1,53 +1,51 @@
-# In file: test.py 
-
 from importer import ExcelImporter
 from backend import AttendanceEngine
 import os
 
+# --- CONFIGURATION ---
+# IMPORTANT: Use ONLY the batch code (e.g., "A1", "B2"), not "CSE A1"
+STUDENT_BATCH = "A1"  
 
-STUDENT_BATCH = "CSE A1" 
-
-
-TARGET_SHEET_INDEX = 0 	
 SEMESTER_START = "2025-07-01" 
-SEMESTER_END 	 = "2026-01-02"
+SEMESTER_END   = "2026-01-02"
+
+EXCEL_FILE_NAME = "timetable.xlsx" 
 
 def test_final():
-    print(f"🚀 Starting Import for Batch: {STUDENT_BATCH}\n")
+    print(f"🚀 Starting Database Refresh for Batch: {STUDENT_BATCH}\n")
 
-    # 1. Find File
+    # 1. Setup Paths
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(base_dir, 'timetable.xlsx')
-    
-    # 2. Run Importer
+    file_path = os.path.join(base_dir, EXCEL_FILE_NAME)
+    db_path = os.path.join(base_dir, "attendance.db")
+
+    # 2. CLEAR OLD DATA (Crucial!)
+    if os.path.exists(db_path):
+        os.remove(db_path)
+        print("🗑️  Deleted old 'attendance.db' to start fresh.")
+
+    # 3. Run the New Importer
     print(f"📂 Reading Excel file from {file_path}...")
     importer = ExcelImporter()
     
-    # Passing '0' opens the first sheet regardless of its name
-    weekly_schedule = importer.parse_excel(file_path, sheet_name=TARGET_SHEET_INDEX)
+    # NEW LOGIC: This single function gets Theory AND Labs
+    final_schedule = importer.get_student_schedule(file_path, STUDENT_BATCH)
     
-    if not weekly_schedule:
-        print("❌ Found nothing. Please check the Excel file path and structure.")
-        print("   1. Make sure 'timetable.xlsx' is in the same directory.")
+    if not final_schedule:
+        print("❌ Error: No schedule found. Check your file name and path.")
         return
 
-    print("✅ Schedule Found!")
-    
-    # ------------------ CRITICAL FILTERING STEP ------------------
-    # 3. Filter the schedule to get only the classes for the user's batch
-    print(f"⚙️ Filtering schedule for {STUDENT_BATCH} using importer logic...")
-    filtered_schedule = importer.get_filtered_schedule(weekly_schedule, STUDENT_BATCH)
-    print(f"✅ Filtered schedule generated. Total class days: {len(filtered_schedule)}")
-    # -------------------------------------------------------------
-
-    # 4. Save the FILTERED schedule to Database
-    print("\n⚙️ Saving Filtered Schedule to Database...")
+    # Debug: Print what we found to prove Labs are there
+    print("\n🔎 Preview of Data Found:")
+    for day, classes in final_schedule.items():
+        print(f"  {day}: {classes}")
+        
+    # 4. Save to Database
+    print("\n⚙️ Saving to Database...")
     engine = AttendanceEngine()
+    engine.generate_semester_schedule(SEMESTER_START, SEMESTER_END, final_schedule)
     
-    # !!! Use the filtered_schedule for database generation !!!
-    engine.generate_semester_schedule(SEMESTER_START, SEMESTER_END, filtered_schedule)
-    
-    print("✅ Done! Database populated with filtered schedule. You can now run 'app.py'")
+    print("✅ Success! Database rebuilt. Run 'app.py' now.")
 
 if __name__ == "__main__":
     test_final()
