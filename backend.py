@@ -59,4 +59,3 @@ class AttendanceEngine:
             VALUES (?, ?, ?, ?)
         """, (date_str, day_name, subject, 'Pending'))
 
-# Note: No commit here, we commit in the main loop for speed

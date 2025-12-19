@@ -1,26 +1,19 @@
-#app file for the gui 
 import flet as ft
 import sqlite3
 from datetime import date
+import os
+import shutil 
+import importer
 
-# --- 1. DATABASE FUNCTIONS ---
+# --- 1. DATABASE & UTILITY FUNCTIONS ---
 def get_todays_sessions():
     """Fetch all classes scheduled for today."""
     try:
         conn = sqlite3.connect("attendance.db")
         cursor = conn.cursor()
-        
-        # FIX: Convert the Date Object to a String "YYYY-MM-DD"
-        # This matches exactly what we saved in the database.
-        today_str = date.today().strftime("%Y-%m-%d") 
-        
-        print(f"DEBUG: Querying database for date: {today_str}") 
-        
+        today_str = date.today().strftime("%Y-%m-%d")
         cursor.execute("SELECT id, subject, status FROM sessions WHERE session_date = ?", (today_str,))
         data = cursor.fetchall()
-        
-        print(f"DEBUG: Database found {len(data)} entries.") 
-        
         conn.close()
         return data
     except Exception as e:
@@ -37,126 +30,176 @@ def update_status(session_id, new_status):
     except Exception as e:
         print(f"Update Error: {e}")
 
-# --- 2. THE APP INTERFACE ---
+# --- 2. MAIN APP STRUCTURE ---
 def main(page: ft.Page):
-    # Window Settings
     page.title = "SIT Attendance Manager"
     page.window_width = 400
-    page.window_height = 700
+    page.window_height = 750
+    page.theme_mode = ft.ThemeMode.DARK
     page.padding = 20
-    
-    # Start in Dark Mode by default
-    page.theme_mode = ft.ThemeMode.DARK 
-    
-    # --- DYNAMIC HEADER (Day & Date) ---
-    today_str = date.today().strftime("%A, %b %d")
-    header_text = ft.Text(today_str, size=28, weight=ft.FontWeight.BOLD)
 
-    # Container for the list of classes
-    sessions_column = ft.Column(spacing=10, scroll="auto", expand=True)
+    # --- UI STATE VARIABLES ---
+    uploaded_file_path = ft.Text("No file selected", size=12, color="grey")
+    batch_input = ft.TextField(label="Batch Year (e.g., 2024)", width=280)
 
-    # Icon for the settings tab (defined early so we can update it)
-    theme_icon = ft.Icon(name="dark_mode")
-
-    # --- FUNCTION TO TOGGLE THEME ---
-    def change_theme(e):
-        if page.theme_mode == ft.ThemeMode.DARK:
-            page.theme_mode = ft.ThemeMode.LIGHT
-            theme_icon.name = "wb_sunny" # Sun icon
+    # --- FILE PICKER HANDLER ---
+    def on_file_picked(e: ft.FilePickerResultEvent):
+        if e.files:
+            file_name = e.files[0].name
+            # In a real desktop app, we might copy this file to our project folder
+            # For now, we just display the name to prove it worked
+            uploaded_file_path.value = f"Selected: {file_name}"
+            uploaded_file_path.update()
         else:
-            page.theme_mode = ft.ThemeMode.DARK
-            theme_icon.name = "dark_mode" # Moon icon
-        page.update()
+            uploaded_file_path.value = "Cancelled selection"
+            uploaded_file_path.update()
 
-    # --- FUNCTION TO LOAD DATA ---
-    def load_sessions():
-        sessions_column.controls.clear()
-        classes = get_todays_sessions()
+    file_picker = ft.FilePicker(on_result=on_file_picked)
+    page.overlay.append(file_picker)
 
-        if not classes:
-            sessions_column.controls.append(
-                ft.Container(
-                    content=ft.Column([
-                        ft.Icon(name="bedtime", size=50, color="grey"),
-                        ft.Text("No classes today! Sleep well.", size=16, color="grey")
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                    alignment=ft.alignment.center,
-                    padding=50
+    # --- NAVIGATION FUNCTIONS ---
+    def route_change(e):
+        page.views.clear()
+        
+        # VIEW 1: LOGIN PAGE
+        if page.route == "/":
+            page.views.append(
+                ft.View(
+                    "/",
+                    [
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon(name="school", size=60, color="blue"),
+                                ft.Text("SIT Attendance", size=24, weight="bold"),
+                                ft.Divider(height=20, color="transparent"),
+                                username_input,
+                                password_input,
+                                ft.ElevatedButton("Login", on_click=login_click, width=280, bgcolor="blue", color="white"),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            alignment=ft.alignment.center,
+                            padding=50,
+                            expand=True
+                        )
+                    ]
                 )
             )
-        else:
-            for session_id, subject, status in classes:
-                sessions_column.controls.append(create_class_card(session_id, subject, status))
+
+        # VIEW 2: UPLOAD PAGE
+        elif page.route == "/upload":
+            page.views.append(
+                ft.View(
+                    "/upload",
+                    [
+                        ft.AppBar(title=ft.Text("Setup Attendance"), bgcolor="surfaceVariant"),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Step 1: Upload Excel Sheet", size=16, weight="bold"),
+                                ft.ElevatedButton("Select File", icon="upload_file", on_click=lambda _: file_picker.pick_files(allow_multiple=False)),
+                                uploaded_file_path,
+                                ft.Divider(),
+                                ft.Text("Step 2: Enter Batch", size=16, weight="bold"),
+                                batch_input,
+                                ft.Divider(height=40, color="transparent"),
+                                ft.ElevatedButton("Process & Start", on_click=process_click, width=280, bgcolor="green", color="white")
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                            padding=30,
+                            alignment=ft.alignment.center,
+                            expand=True
+                        )
+                    ]
+                )
+            )
+
+        # VIEW 3: MAIN APP (Your original code)
+        elif page.route == "/app":
+            # Load your original Tabs structure here
+            load_sessions() # Refresh data
+            page.views.append(
+                ft.View(
+                    "/app",
+                    [
+                        ft.Tabs(
+                            selected_index=0,
+                            animation_duration=300,
+                            tabs=[
+                                ft.Tab(text="Home", icon="home", content=home_tab),
+                                ft.Tab(text="Settings", icon="settings", content=settings_tab),
+                            ],
+                            expand=True
+                        )
+                    ]
+                )
+            )
         
         page.update()
 
-    # --- CARD CREATOR ---
-    def create_class_card(s_id, sub_name, current_status):
-        
-        status_color = "bluegrey"
-        status_text = "Pending"
-        
-        # Default Icon (Book for Theory)
-        icon_name = "menu_book"
-        icon_color = "blue"
+    def view_pop(e):
+        page.views.pop()
+        top_view = page.views[-1]
+        page.go(top_view.route)
 
-        # Check for [LAB] tag
-        if "[LAB]" in sub_name:
-            # Clean the name (remove the tag for display)
-            sub_name = sub_name.replace("[LAB]", "").strip()
-            # Change Icon to Flask
-            icon_name = "science" 
-            icon_color = "purple"
-        
-        if current_status == "Present": 
-            status_color = "green"
-            status_text = "PRESENT"
-        elif current_status == "Absent": 
-            status_color = "red"
-            status_text = "ABSENT"
+    # --- EVENT HANDLERS ---
+    username_input = ft.TextField(label="Username", width=280)
+    password_input = ft.TextField(label="Password", password=True, can_reveal_password=True, width=280)
 
-        def on_present(e):
-            update_status(s_id, "Present")
-            load_sessions()
+    def login_click(e):
+        if username_input.value == "admin" and password_input.value == "sit123":
+            page.go("/upload")
+        else:
+            page.snack_bar = ft.SnackBar(ft.Text("Invalid credentials!"), bgcolor="red")
+            page.snack_bar.open = True
+            page.update()
 
-        def on_absent(e):
-            update_status(s_id, "Absent")
-            load_sessions()
-
-        return ft.Container(
-            padding=15,
-            border_radius=10,
-            # Use string "surfaceVariant" to avoid version errors
-            bgcolor="surfaceVariant", 
-            content=ft.Column([
-                # Row 1: Icon + Name + Status
-                ft.Row([
-                    ft.Row([
-                        ft.Icon(name=icon_name, color=icon_color),
-                        ft.Text(sub_name, size=16, weight=ft.FontWeight.BOLD),
-                    ]),
-                    ft.Container(
-                        content=ft.Text(status_text, size=10, color="white", weight=ft.FontWeight.BOLD),
-                        bgcolor=status_color,
-                        padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                        border_radius=5
-                    )
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+    
+    def process_click(e):
+            if "No file" in uploaded_file_path.value:
+                page.snack_bar = ft.SnackBar(ft.Text("Please upload a file first!"), bgcolor="orange")
+                page.snack_bar.open = True
+                page.update()
+                return
                 
-                ft.Divider(height=20, color="grey"),
+            # --- THE CONNECTION IS HERE ---
+            try:
+                import importer  # This imports your importer.py file
                 
-                # Row 2: Buttons
-                ft.Row([
-                    ft.ElevatedButton("Present", icon="check", on_click=on_present, 
-                                      color="white", bgcolor="green700"),
-                    ft.ElevatedButton("Absent", icon="close", on_click=on_absent, 
-                                      color="white", bgcolor="red700"),
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
-            ])
-        )
+                # This calls the main function in your importer.
+                # CHECK: Does your importer.py have a function named 'process_excel' or 'main'?
+                # Replace 'process_excel' below with whatever your function is actually named.
+                importer.process_excel(uploaded_file_path.value, batch_input.value)
+                
+                page.snack_bar = ft.SnackBar(ft.Text("Processing Complete!"), bgcolor="green")
+                page.snack_bar.open = True
+                page.update()
+                
+                # Move to the main app view to see the results
+                page.go("/app")
+                
+            except Exception as err:
+                # If something breaks in the importer, show the error on screen
+                page.snack_bar = ft.SnackBar(ft.Text(f"Error: {str(err)}"), bgcolor="red")
+                page.snack_bar.open = True
+                page.update()
+            
+        # HERE IS WHERE YOU CONNECT YOUR BACKEND IMPORTER
+        # import importer
+        # importer.process(uploaded_file_path.value, batch_input.value)
+        
+    page.snack_bar = ft.SnackBar(ft.Text("Processing Complete!"), bgcolor="green")
+    page.snack_bar.open = True
+    page.update()
+        
+        # Move to the main app view
+    page.go("/app")
 
-    # --- LAYOUT: TABS ---
-    # Tab 1: Home (The Schedule)
+
+    # --- YOUR ORIGINAL UI COMPONENTS (Preserved) ---
+    sessions_column = ft.Column(spacing=10, scroll="auto", expand=True)
+    
+    # Header
+    today_str = date.today().strftime("%A, %b %d")
+    header_text = ft.Text(today_str, size=28, weight=ft.FontWeight.BOLD)
+    
+    # Home Tab Container
     home_tab = ft.Container(
         padding=10,
         content=ft.Column([
@@ -166,32 +209,79 @@ def main(page: ft.Page):
         ], expand=True)
     )
 
-    # Tab 2: Settings (Theme Switcher)
+    # Theme Switcher Logic
+    def change_theme(e):
+        page.theme_mode = ft.ThemeMode.LIGHT if page.theme_mode == ft.ThemeMode.DARK else ft.ThemeMode.DARK
+        page.update()
+
     settings_tab = ft.Container(
         padding=20,
         content=ft.Column([
-            ft.Text("Settings", size=24, weight=ft.FontWeight.BOLD),
+            ft.Text("Settings", size=24, weight="bold"),
             ft.Divider(),
             ft.Row([
-                ft.Text("Theme Mode", size=18),
-                ft.Switch(label="Dark Mode", value=True, on_change=change_theme)
+                ft.Text("Dark Mode", size=18),
+                ft.Switch(value=True, on_change=change_theme)
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            ft.Text("Toggle to switch between Light and Dark themes.", size=12, color="grey")
+            ft.ElevatedButton("Logout", on_click=lambda _: page.go("/"), color="red")
         ])
     )
 
-    # Add Tabs to Page
-    t = ft.Tabs(
-        selected_index=0,
-        animation_duration=300,
-        tabs=[
-            ft.Tab(text="Home", icon="home", content=home_tab),
-            ft.Tab(text="Settings", icon="settings", content=settings_tab),
-        ],
-        expand=True
-    )
+    # --- DATA LOADING (Your original logic) ---
+    def load_sessions():
+        sessions_column.controls.clear()
+        classes = get_todays_sessions()
 
-    page.add(t)
-    load_sessions()
+        if not classes:
+            sessions_column.controls.append(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(name="bedtime", size=50, color="grey"),
+                        ft.Text("No classes today!", size=16, color="grey")
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    alignment=ft.alignment.center,
+                    padding=50
+                )
+            )
+        else:
+            for s_id, sub, status in classes:
+                sessions_column.controls.append(create_class_card(s_id, sub, status))
+
+    def create_class_card(s_id, sub_name, current_status):
+        status_color = "green" if current_status == "Present" else "red" if current_status == "Absent" else "bluegrey"
+        status_text = current_status if current_status != "Pending" else "Pending"
+        icon_name = "science" if "[LAB]" in sub_name else "menu_book"
+        icon_color = "purple" if "[LAB]" in sub_name else "blue"
+        sub_name = sub_name.replace("[LAB]", "").strip()
+
+        def on_present(e):
+            update_status(s_id, "Present")
+            load_sessions()
+            page.update()
+
+        def on_absent(e):
+            update_status(s_id, "Absent")
+            load_sessions()
+            page.update()
+
+        return ft.Container(
+            padding=15, border_radius=10, bgcolor="surfaceVariant",
+            content=ft.Column([
+                ft.Row([
+                    ft.Row([ft.Icon(name=icon_name, color=icon_color), ft.Text(sub_name, size=16, weight="bold")]),
+                    ft.Container(content=ft.Text(status_text, size=10, color="white", weight="bold"), bgcolor=status_color, padding=ft.padding.symmetric(horizontal=8, vertical=4), border_radius=5)
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Divider(height=20, color="grey"),
+                ft.Row([
+                    ft.ElevatedButton("Present", icon="check", on_click=on_present, color="white", bgcolor="green700"),
+                    ft.ElevatedButton("Absent", icon="close", on_click=on_absent, color="white", bgcolor="red700"),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+            ])
+        )
+
+    # --- INITIALIZATION ---
+    page.on_route_change = route_change
+    page.on_view_pop = view_pop
+    page.go(page.route)
 
 ft.app(target=main)
