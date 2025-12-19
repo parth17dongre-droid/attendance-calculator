@@ -68,15 +68,16 @@ def get_subject_stats():
             continue
             
         if clean_name not in stats:
-            stats[clean_name] = {'earned': 0, 'conducted': 0}
+            # earned = points got, conducted = points finished, future = points pending
+            stats[clean_name] = {'earned': 0, 'conducted': 0, 'future': 0}
         
-        # Only add to 'conducted' score if it has actually happened (Present/Absent)
-        # We assume 'Pending' means it hasn't happened yet.
-        if status in ['Present', 'Absent']:
-            stats[clean_name]['conducted'] += pts
-            
         if status == 'Present':
             stats[clean_name]['earned'] += pts
+            stats[clean_name]['conducted'] += pts
+        elif status == 'Absent':
+            stats[clean_name]['conducted'] += pts
+        elif status == 'Pending':
+            stats[clean_name]['future'] += pts
             
     return stats
 
@@ -115,13 +116,63 @@ def main(page: ft.Page):
             ))
         else:
             for s_id, sub, status, pts in classes:
-                # Optional: Hide ELH from Today's View too? 
-                # If you want to see free hours, keep it. If not, uncomment next 2 lines:
-                # if "ELH" in sub:
-                #    continue
                 home_column.controls.append(create_class_card(s_id, sub, status, pts))
         
         page.update()
+
+    def show_subject_details(sub_name, data):
+        # DEBUG: Print to terminal to confirm click works
+        print(f"Clicked on: {sub_name}") 
+        
+        earned = data['earned']
+        conducted = data['conducted']
+        future = data['future']
+        total_sem = conducted + future
+
+        # Calculate percentages
+        current = (earned / conducted * 100) if conducted > 0 else 0.0
+        max_possible = ((earned + future) / total_sem * 100) if total_sem > 0 else 0.0
+        min_possible = (earned / total_sem * 100) if total_sem > 0 else 0.0
+
+        # Create the Dialog UI
+        dlg = ft.AlertDialog(
+            title=ft.Text(sub_name, weight="bold"),
+            content=ft.Container(
+                width=300, # Force width
+                content=ft.Column([
+                    ft.Text(f"Current: {current:.1f}%", size=20, weight="bold"),
+                    ft.Divider(),
+                    
+                    ft.Row([
+                        ft.Text("Max Possible:", color="grey"),
+                        ft.Text(f"{max_possible:.1f}%", color="green", weight="bold")
+                    ], alignment="spaceBetween"),
+                    
+                    ft.Row([
+                        ft.Text("Min Possible:", color="grey"),
+                        ft.Text(f"{min_possible:.1f}%", color="red", weight="bold")
+                    ], alignment="spaceBetween"),
+                    
+                    ft.Divider(),
+                    ft.Text(f"Total Points: {total_sem}", size=12, italic=True, color="grey"),
+                ], tight=True, spacing=10)
+            ),
+            actions=[
+                # UPDATED CLOSE ACTION
+                ft.TextButton("Close", on_click=lambda e: page.close(dlg)) 
+            ],
+            actions_alignment="end",
+        )
+
+        # --- UPDATED OPENING LOGIC ---
+        # This handles both new and old Flet versions safely
+        try:
+            page.open(dlg)
+        except AttributeError:
+            # Fallback for older Flet versions
+            page.dialog = dlg
+            dlg.open = True
+            page.update()
 
     def load_stats_tab():
         stats_column.controls.clear()
@@ -170,7 +221,6 @@ def main(page: ft.Page):
                 conducted = data['conducted']
                 earned_pts = data['earned']
                 
-                # If no classes happened yet, show 0% or "No classes"
                 if conducted > 0:
                     pct = (earned_pts / conducted * 100)
                     bar_color = "green" if pct >= 75 else "orange" if pct >= 60 else "red"
@@ -181,8 +231,14 @@ def main(page: ft.Page):
                     label_text = "No classes yet"
                     progress_val = 0
                 
+                # --- NEW CLICKABLE CONTAINER ---
                 stats_column.controls.append(ft.Container(
-                    padding=10, border_radius=10, bgcolor="surfaceVariant",
+                    padding=15, 
+                    border_radius=10, 
+                    bgcolor="surfaceVariant",
+                    # Binds the click event to open the details dialog
+                    on_click=lambda e, n=sub_name, d=data: show_subject_details(n, d),
+                    ink=True, 
                     content=ft.Column([
                         ft.Row([
                             ft.Text(sub_name, weight="bold", expand=True),
