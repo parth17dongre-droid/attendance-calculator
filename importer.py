@@ -1,183 +1,145 @@
-import flet as ft
+import pandas as pd
 import sqlite3
-from datetime import date
-import os
-import shutil
+from datetime import datetime, timedelta, date
+import traceback
+import re
 
-# --- UTILS ---
-def get_todays_sessions():
-    conn = sqlite3.connect("attendance.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, subject, status FROM sessions WHERE session_date = ?", (date.today().strftime("%Y-%m-%d"),))
-    data = cursor.fetchall()
-    conn.close()
-    return data
-
-def update_status_db(s_id, status):
-    conn = sqlite3.connect("attendance.db")
-    conn.execute("UPDATE sessions SET status = ? WHERE id = ?", (status, s_id))
-    conn.commit()
-    conn.close()
-
-# --- MAIN APP ---
-def main(page: ft.Page):
-    page.title = "SIT Attendance"
-    page.window_width = 400
-    page.window_height = 750
-    page.theme_mode = ft.ThemeMode.DARK
-    page.padding = 0
-
-    # --- 1. SETUP PAGE COMPONENTS ---
-    name_input = ft.TextField(label="Full Name", icon="person")
-    class_input = ft.Dropdown(label="Class", options=[
-        ft.dropdown.Option("CSE"), ft.dropdown.Option("AIML"), 
-        ft.dropdown.Option("ECE"), ft.dropdown.Option("MECH")
-    ], icon="school")
-    batch_input = ft.TextField(label="Batch (e.g., A1, B2)", icon="group")
-    
-    file_status = ft.Text("No file selected", color="grey", size=12)
-    
-    def on_file_result(e: ft.FilePickerResultEvent):
-        if e.files:
-            file_status.value = e.files[0].path
-            file_status.color = "green"
-            file_status.update()
-    
-    file_picker = ft.FilePicker(on_result=on_file_result)
-    page.overlay.append(file_picker)
-
-    def finish_setup(e):
-        if not name_input.value or not batch_input.value or "No file" in file_status.value:
-            page.snack_bar = ft.SnackBar(ft.Text("Please fill all details!"), bgcolor="red")
-            page.snack_bar.open = True
-            page.update()
-            return
-
+# --- PART 1: EXCEL READER ---
+class ExcelImporter:
+    def get_schedule(self, file_path, batch, sheet_name=None):
+        schedule = {}
+        print(f"DEBUG: [Importer] Reading file: {file_path} (Sheet: {sheet_name})")
+        
         try:
-            # 1. Run the Backend Importer
-            import importer
-            count = importer.process_excel(file_status.value, batch_input.value)
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
+        except Exception as e:
+            raise Exception(f"Error reading Excel: {e}")
+
+        df.iloc[:, 0] = df.iloc[:, 0].ffill()
+
+        for index, row in df.iterrows():
+            if len(row) < 2: continue
+            day_raw = str(row[0]).strip().upper()
+            day_map = {
+                "MON": "Monday", "MONDAY": "Monday",
+                "TUE": "Tuesday", "TUESDAY": "Tuesday",
+                "WED": "Wednesday", "WEDNESDAY": "Wednesday",
+                "THU": "Thursday", "THURSDAY": "Thursday",
+                "FRI": "Friday", "FRIDAY": "Friday",
+                "SAT": "Saturday", "SATURDAY": "Saturday"
+            }
             
-            # 2. Save User Details locally
-            page.client_storage.set("user_name", name_input.value)
-            page.client_storage.set("user_batch", batch_input.value)
-            page.client_storage.set("setup_complete", True)
+            if day_raw in day_map:
+                day_key = day_map[day_raw]
+                if day_key not in schedule: schedule[day_key] = []
 
-            page.snack_bar = ft.SnackBar(ft.Text(f"Setup Complete! Added {count} classes."), bgcolor="green")
-            page.snack_bar.open = True
-            page.update()
+                for col in range(1, len(row) - 1):
+                    cell = row[col]
+                    next_cell = row[col+1]
+
+                    if pd.notna(cell) and str(cell).strip() not in ["-", "nan", ""]:
+                        is_lab = pd.isna(next_cell) or str(next_cell).strip() in ["", "nan"]
+                        data = self._parse_cell(str(cell), batch, is_lab)
+                        if data: schedule[day_key].append(data)
+
+        return schedule
+
+    def _parse_cell(self, text, batch, is_lab):
+        text = str(text).strip().replace("\n", " ")
+        if "LUNCH" in text.upper(): return None
+
+        # THEORY (2 Points)
+        if not is_lab: return {"name": text, "type": "Theory", "points": 2}
+
+        # LAB (4 Points) - Surgical Extraction
+        pattern = fr"(?:CSE\s+)?{re.escape(batch)}\s*[:\-\s]\s*(.*?)(?=\s+(?:CSE\s+)?[A-Z]\d[:\-\s]|$)"
+        match = re.search(pattern, text, re.IGNORECASE)
+        
+        if match:
+            lab_info = match.group(1).strip()
+            if not lab_info: return None
+            return {"name": f"[LAB] {lab_info}", "type": "Lab", "points": 4}
+        
+        if batch.lower() in text.lower() and "CSE" not in text and ":" not in text:
+             return {"name": f"[LAB] {text}", "type": "Lab", "points": 4}
+        
+        return None
+
+# --- PART 2: DB ENGINE ---
+class AttendanceEngine:
+    def __init__(self, db_name="attendance.db"):
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self.create_tables()
+
+    def create_tables(self):
+        # We DROP the table to ensure the new 'points' column is added correctly
+        self.cursor.execute("DROP TABLE IF EXISTS sessions")
+        self.cursor.execute("""
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date TEXT,
+                day_name TEXT,
+                subject TEXT,
+                type TEXT,
+                points INTEGER,
+                status TEXT DEFAULT 'Pending'
+            )
+        """)
+        self.conn.commit()
+
+    def generate_semester_schedule(self, weekly_timetable, start_date_str, end_date_str):
+        # 1. Parse Dates
+        try:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise Exception("Invalid Date Format! Use YYYY-MM-DD")
+
+        print(f"DEBUG: Generating schedule from {start_date} to {end_date}")
+
+        current_day = start_date
+        count = 0
+        
+        # 2. Loop through every day of the semester
+        while current_day <= end_date:
+            day_name = current_day.strftime("%A")
             
-            # 3. Go to App
-            page.go("/app")
+            if day_name in weekly_timetable:
+                classes = weekly_timetable[day_name]
+                for cls in classes:
+                    # cls is now a dictionary: {'name': 'Math', 'points': 2}
+                    self.add_session(current_day, day_name, cls['name'], cls['type'], cls['points'])
+                    count += 1
             
-        except Exception as err:
-            page.snack_bar = ft.SnackBar(ft.Text(f"Error: {str(err)}"), bgcolor="red")
-            page.snack_bar.open = True
-            page.update()
-
-    # --- 2. MAIN APP COMPONENTS ---
-    sessions_col = ft.Column(scroll="auto", expand=True)
-
-    def load_data():
-        sessions_col.controls.clear()
-        data = get_todays_sessions()
+            current_day += timedelta(days=1)
         
-        # User Greeting
-        user_name = page.client_storage.get("user_name") or "Student"
-        sessions_col.controls.append(
-            ft.Container(
-                content=ft.Column([
-                    ft.Text(f"Hi, {user_name} 👋", size=24, weight="bold"),
-                    ft.Text(date.today().strftime("%A, %b %d"), size=16, color="grey"),
-                    ft.Divider(height=20, color="transparent"),
-                ]), padding=20
-            )
-        )
+        self.conn.commit()
+        return count
 
-        if not data:
-            sessions_col.controls.append(ft.Container(content=ft.Text("No classes today!", size=16, color="grey"), alignment=ft.alignment.center, padding=50))
+    def add_session(self, date_obj, day_name, subject, type, points):
+        date_str = date_obj.strftime("%Y-%m-%d")
+        self.cursor.execute("""
+            INSERT INTO sessions (session_date, day_name, subject, type, points, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (date_str, day_name, subject, type, points, 'Pending'))
+
+# --- PART 3: BRIDGE ---
+def process_excel(file_path, batch, start_date, end_date, sheet_name=None):
+    try:
+        importer = ExcelImporter()
+        timetable_data = importer.get_schedule(file_path, batch, sheet_name)
         
-        for s_id, sub, status in data:
-            # Card Logic
-            icon = "science" if "[LAB]" in sub else "menu_book"
-            color = "green" if status == "Present" else "red" if status == "Absent" else "surfaceVariant"
+        if not timetable_data:
+            print(f"WARNING: No classes found for batch {batch}")
             
-            c = ft.Container(
-                padding=15, border_radius=10, bgcolor="surfaceVariant",
-                content=ft.Column([
-                    ft.Row([ft.Icon(icon), ft.Text(sub, weight="bold", size=16)], alignment="start"),
-                    ft.Row([
-                        ft.ElevatedButton("Present", on_click=lambda e, sid=s_id: mark(sid, "Present"), bgcolor="green", color="white"),
-                        ft.ElevatedButton("Absent", on_click=lambda e, sid=s_id: mark(sid, "Absent"), bgcolor="red", color="white")
-                    ], alignment="spaceBetween", margin=ft.margin.only(top=10))
-                ])
-            )
-            sessions_col.controls.append(c)
-        page.update()
-
-    def mark(s_id, status):
-        update_status_db(s_id, status)
-        load_data()
-
-    # --- 3. ROUTING ---
-    def route_change(route):
-        page.views.clear()
+        engine = AttendanceEngine()
+        # Pass the custom dates here
+        count = engine.generate_semester_schedule(timetable_data, start_date, end_date)
         
-        # VIEW: SETUP
-        if page.route == "/setup":
-            page.views.append(
-                ft.View(
-                    "/setup",
-                    [
-                        ft.Container(
-                            padding=30,
-                            content=ft.Column([
-                                ft.Icon(name="school", size=80, color="blue"),
-                                ft.Text("Welcome!", size=30, weight="bold"),
-                                ft.Text("Let's set up your profile.", color="grey"),
-                                ft.Divider(height=20, color="transparent"),
-                                name_input,
-                                class_input,
-                                batch_input,
-                                ft.Divider(height=10, color="transparent"),
-                                ft.Text("Upload Timetable (Excel)", weight="bold"),
-                                ft.Row([
-                                    ft.ElevatedButton("Choose File", icon="upload", on_click=lambda _: file_picker.pick_files()),
-                                    file_status
-                                ]),
-                                ft.Divider(height=30, color="transparent"),
-                                ft.ElevatedButton("Start Attendance", on_click=finish_setup, width=400, height=50, bgcolor="blue", color="white")
-                            ])
-                        )
-                    ]
-                )
-            )
-        
-        # VIEW: APP
-        elif page.route == "/app":
-            load_data()
-            page.views.append(
-                ft.View(
-                    "/app",
-                    [
-                        sessions_col,
-                        ft.FloatingActionButton(icon="settings", on_click=lambda _: clear_data())
-                    ]
-                )
-            )
-        page.update()
+        print(f"SUCCESS: Generated {count} sessions.")
+        return count
 
-    def clear_data():
-        # Reset everything (Logout)
-        page.client_storage.clear()
-        page.go("/setup")
-
-    # --- INITIAL CHECK ---
-    page.on_route_change = route_change
-    
-    if page.client_storage.contains_key("setup_complete"):
-        page.go("/app")
-    else:
-        page.go("/setup")
-
-ft.app(target=main)
+    except Exception as e:
+        traceback.print_exc()
+        raise e
